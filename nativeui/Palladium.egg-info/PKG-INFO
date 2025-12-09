@@ -1,0 +1,6 @@
+Metadata-Version: 2.1
+Name: Palladium
+Version: 0.1.0
+Summary: Low-level Python UI library with pixel manipulation, animations, and effects
+Author: User
+Requires-Python: >=3.8
