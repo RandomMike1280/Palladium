@@ -6,6 +6,8 @@ Demonstrates Rounded Rectangles, Pills, and Squircles
 import Palladium as ui
 import math
 
+ui.device('gpu')
+
 def main():
     ui.init()
     window = ui.Window("NativeUI Shapes Demo", 1000, 600)

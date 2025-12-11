@@ -4,6 +4,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>
+#include <algorithm>
 
 // Define common font locations for Windows (simplistic)
 #ifdef _WIN32
@@ -91,6 +92,47 @@ std::shared_ptr<Surface> Font::render(const std::string& text, const Color& colo
     return result;
 }
 
+std::shared_ptr<Surface> Font::render_wrapped(const std::string& text, const Color& color, int wrap_width) {
+    if (!impl_->font || text.empty()) return nullptr;
+
+    SDL_Color sdl_color = { color.r, color.g, color.b, color.a };
+    
+    // Use wrapped rendering
+    SDL_Surface* surface = TTF_RenderUTF8_Blended_Wrapped(impl_->font, text.c_str(), sdl_color, wrap_width);
+    
+    if (!surface) {
+        return nullptr;
+    }
+
+    // Convert SDL_Surface to our Surface (duplicate logic for now to avoid refactor overhead)
+    // SDL_ttf blended mode returns 32-bit usually
+    if (surface->format->BytesPerPixel != 4) {
+         SDL_FreeSurface(surface);
+         return nullptr; 
+    }
+
+    auto result = std::make_shared<Surface>(surface->w, surface->h);
+    
+    SDL_LockSurface(surface);
+    
+    uint8_t* src_pixels = static_cast<uint8_t*>(surface->pixels);
+    int pitch = surface->pitch;
+    
+    for (int y = 0; y < surface->h; ++y) {
+        for (int x = 0; x < surface->w; ++x) {
+            uint32_t pixel = *reinterpret_cast<uint32_t*>(src_pixels + y * pitch + x * 4);
+            uint8_t r, g, b, a;
+            SDL_GetRGBA(pixel, surface->format, &r, &g, &b, &a);
+            result->set_pixel(x, y, Color(r, g, b, a));
+        }
+    }
+    
+    SDL_UnlockSurface(surface);
+    SDL_FreeSurface(surface);
+    
+    return result;
+}
+
 int Font::get_height() const {
     if (!impl_->font) return 0;
     return TTF_FontHeight(impl_->font);
@@ -116,9 +158,21 @@ std::string FontCache::resolve_path(const std::string& name) {
     if (std::filesystem::exists(sys_path)) return sys_path;
     
     // Fallback: simple mapping (very basic)
-    if (name == "Roboto" || name == "Arial") {
-        // Just look for arial.ttf common on windows
-        sys_path = SYSTEM_FONT_DIR + "arial.ttf";
+    std::string lower_name = name;
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+    
+    std::map<std::string, std::string> font_map = {
+        {"arial", "arial.ttf"},
+        {"roboto", "arial.ttf"}, // Mapped to Arial
+        {"roboto bold", "arialbd.ttf"}, // Map to Arial Bold
+        {"segoe ui", "segoeui.ttf"},
+        {"times new roman", "times.ttf"},
+        {"verdana", "verdana.ttf"},
+        {"consolas", "consolas.ttf"}
+    };
+    
+    if (font_map.find(lower_name) != font_map.end()) {
+        sys_path = SYSTEM_FONT_DIR + font_map[lower_name];
         if (std::filesystem::exists(sys_path)) return sys_path;
     }
     

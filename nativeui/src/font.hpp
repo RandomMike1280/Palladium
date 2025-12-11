@@ -28,6 +28,9 @@ public:
     // Render text
     std::shared_ptr<Surface> render(const std::string& text, const Color& color);
     
+    // Render text wrapped to a specific width (pixels)
+    std::shared_ptr<Surface> render_wrapped(const std::string& text, const Color& color, int wrap_width);
+    
     // Metrics
     int get_height() const;
     void get_size(const std::string& text, int& w, int& h);

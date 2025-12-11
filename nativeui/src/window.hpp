@@ -71,15 +71,20 @@ public:
     void wait_event(Event& event);
     
     // Rendering
-    void present(const Surface& surface);
+    void draw(std::shared_ptr<Surface> surface);
+    void present(); // New parameterless present
+    void present(const Surface& surface); // Existing one for compat
     void clear(const Color& color = Color(0, 0, 0, 255));
     
     // Frame timing
     float get_delta_time() const { return delta_time_; }
     float get_fps() const { return fps_; }
     void set_target_fps(int fps);
+    void set_unfocused_fps(int fps);
     
-    // Cursor
+    // Window state
+    bool is_focused() const;
+    bool is_minimized() const;
     void set_cursor_visible(bool visible);
     void set_cursor_position(int x, int y);
     
@@ -101,12 +106,14 @@ private:
     SDL_Window* window_;
     SDL_Renderer* renderer_;
     SDL_Texture* texture_;
+    std::shared_ptr<Surface> pending_surface_;
     
     // Timing
     uint64_t last_frame_time_;
     float delta_time_;
     float fps_;
     int target_fps_;
+    int unfocused_fps_;
     
     void update_timing();
     Event translate_event(const SDL_Event& sdl_event);

@@ -79,13 +79,21 @@ ext_modules = [
             'src/button.cpp',
             'src/font.cpp',
             'src/textfield.cpp',
+            # GPU acceleration (Windows only, compiled conditionally)
+            'src/d2d_context.cpp',
+            'src/gpu_surface.cpp',
+            'src/gpu_effects.cpp',
+            'src/gpu_window.cpp',
+            'src/slider.cpp',
+            'src/gpu_text.cpp',
+            'src/cpu_text.cpp',
         ],
         include_dirs=[
             get_pybind_include(),
             'src',
         ] + sdl2_include,
         library_dirs=sdl2_lib,
-        libraries=['SDL2', 'SDL2_ttf'],
+        libraries=['SDL2', 'SDL2_ttf', 'd2d1', 'd3d11', 'dxgi', 'dwrite', 'gdi32'],
         language='c++',
     ),
 ]

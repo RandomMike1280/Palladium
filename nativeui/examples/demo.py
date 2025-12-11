@@ -14,6 +14,8 @@ import Palladium as ui
 import math
 import random
 
+ui.device('gpu')
+
 # Window dimensions
 WIDTH = 800
 HEIGHT = 600

@@ -43,7 +43,7 @@ def main():
     
     # --- 3. Frosted Glass Button (Squircle) ---
     btn_glass = ui.Button(150, 150, ui.ButtonShape.Squircle, 0,
-        normal={'color': ui.Color(255, 255, 255, 80), 'blur_radius': 10.0},
+        normal={'color': ui.Color(255, 255, 255, 80), 'blur_radius': 5.0},
         hover={'color': ui.Color(255, 255, 255, 120), 'blur_radius': 25.0, 'scale': 1.05},
         pressed={'color': ui.Color(255, 255, 255, 160), 'blur_radius': 50.0, 'scale': 0.95},
         hover_anim="exponential", duration=0.3

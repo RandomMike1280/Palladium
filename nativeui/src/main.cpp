@@ -15,7 +15,20 @@
 #include "material.hpp"
 #include "input.hpp"
 #include "button.hpp"
+#include "slider.hpp"
 #include "textfield.hpp"
+
+// GPU acceleration (Windows only)
+#ifdef _WIN32
+#include "d2d_context.hpp"
+#include "gpu_surface.hpp"
+#include "gpu_effects.hpp"
+#include "gpu_window.hpp"
+#include "gpu_text.hpp"
+#endif
+
+#include "cpu_text.hpp"
+#include "text_common.hpp"
 
 namespace py = pybind11;
 using namespace nativeui;
@@ -72,8 +85,62 @@ ButtonTextStyle parse_text_style(const py::dict& d) {
     return s;
 }
 
+// === Global Device Mode ===
+enum class DeviceMode {
+    CPU,
+    GPU
+};
+
+static DeviceMode g_device_mode = DeviceMode::CPU;
+
+bool set_device_mode(const std::string& mode) {
+    if (mode == "gpu" || mode == "GPU") {
+#ifdef _WIN32
+        if (palladium::D2DContext::instance().is_available()) {
+            g_device_mode = DeviceMode::GPU;
+            return true;
+        }
+        return false; // GPU not available
+#else
+        return false; // GPU only on Windows
+#endif
+    } else if (mode == "cpu" || mode == "CPU") {
+        g_device_mode = DeviceMode::CPU;
+        return true;
+    }
+    return false;
+}
+
+std::string get_device_mode() {
+    return g_device_mode == DeviceMode::GPU ? "gpu" : "cpu";
+}
+
+bool is_gpu_mode() {
+    return g_device_mode == DeviceMode::GPU;
+}
+
 PYBIND11_MODULE(Palladium, m) {
     m.doc() = "Palladium - Low-level Python UI library with pixel manipulation, animations, and effects";
+    
+    // === Device Mode ===
+    m.def("device", [](const std::string& mode) -> bool {
+        return set_device_mode(mode);
+    }, py::arg("mode"),
+    R"doc(Set the rendering device mode.
+
+Args:
+    mode: 'gpu' for hardware acceleration, 'cpu' for software rendering
+
+Returns:
+    True if mode was set successfully, False otherwise (e.g., GPU not available)
+
+Example:
+    ui.device('gpu' if ui.is_gpu_available() else 'cpu')
+)doc");
+
+    m.def("get_device", []() -> std::string {
+        return get_device_mode();
+    }, "Get the current rendering device mode ('gpu' or 'cpu')");
     
     // === Color ===
     py::class_<Color>(m, "Color")
@@ -102,7 +169,9 @@ PYBIND11_MODULE(Palladium, m) {
         .def("get_pixel", &Surface::get_pixel)
         .def("fill", &Surface::fill)
         .def("fill_rect", &Surface::fill_rect)
-        .def("clear", &Surface::clear)
+        .def("clear", [](Surface& s, const Color& c) {
+            s.fill(c);
+        }, py::arg("color") = Color(0, 0, 0, 0))
         .def("draw_line", &Surface::draw_line)
         .def("draw_rect", &Surface::draw_rect)
         .def("draw_circle", &Surface::draw_circle)
@@ -177,9 +246,14 @@ PYBIND11_MODULE(Palladium, m) {
             w.wait_event(e);
             return e;
         })
-        .def("present", &Window::present)
+        .def("draw", &Window::draw, py::arg("surface"))
+        .def("present", py::overload_cast<>(&Window::present))
+        .def("present", py::overload_cast<const Surface&>(&Window::present))
         .def("clear", &Window::clear, py::arg("color") = Color(0, 0, 0, 255))
         .def("set_target_fps", &Window::set_target_fps)
+        .def("set_unfocused_fps", &Window::set_unfocused_fps)
+        .def_property_readonly("is_focused", &Window::is_focused)
+        .def_property_readonly("is_minimized", &Window::is_minimized)
         .def("set_cursor_visible", &Window::set_cursor_visible)
         .def("set_cursor_position", &Window::set_cursor_position)
         .def("set_fullscreen", &Window::set_fullscreen)
@@ -531,7 +605,39 @@ PYBIND11_MODULE(Palladium, m) {
         .def("set_hover_style", [](Button& b, py::dict d) { b.set_hover_style(parse_style(d)); })
         .def("set_pressed_style", [](Button& b, py::dict d) { b.set_pressed_style(parse_style(d)); })
         .def("set_text_style", [](Button& b, py::dict d) { b.set_text_style(parse_text_style(d)); }) // Exposed setter
+        .def("set_text_style", [](Button& b, py::dict d) { b.set_text_style(parse_text_style(d)); }) // Exposed setter
         .def("set_hover_animation", &Button::set_hover_animation);
+
+    // === Slider Enums ===
+    py::enum_<SliderShape>(m, "SliderShape")
+        .value("Rectangle", SliderShape::Rectangle)
+        .value("Pill", SliderShape::Pill)
+        .value("Arc", SliderShape::Arc);
+
+    // === Slider ===
+    py::class_<Slider, std::shared_ptr<Slider>>(m, "Slider")
+        .def(py::init<SliderShape>(), py::arg("shape") = SliderShape::Pill)
+        .def_property("value", &Slider::get_value, &Slider::set_value)
+        .def("set_range", &Slider::set_range, py::arg("min"), py::arg("max"))
+        .def_property("shape", &Slider::get_shape, &Slider::set_shape)
+        .def("set_position", &Slider::set_position, py::arg("x"), py::arg("y"))
+        .def("set_dimensions", &Slider::set_dimensions,
+             py::arg("width"), py::arg("height"), "Set length/width and thickness/height")
+        .def("set_arc_angles", &Slider::set_arc_angles,
+             py::arg("start"), py::arg("sweep"), "Set start and sweep angles for Arc shape")
+        .def("set_colors", &Slider::set_colors,
+             py::arg("bg"), py::arg("fill"), py::arg("text"))
+        .def("set_show_value", &Slider::set_show_value)
+        .def("on_change", &Slider::on_change)
+        .def("update", &Slider::update)
+        .def("handle_event", &Slider::handle_event)
+        .def("draw", py::overload_cast<palladium::GPUSurface&>(&Slider::draw))
+        .def("draw", py::overload_cast<nativeui::Surface&>(&Slider::draw))
+        // Read-only metrics
+        .def_property_readonly("x", &Slider::get_x)
+        .def_property_readonly("y", &Slider::get_y)
+        .def_property_readonly("width", &Slider::get_width)
+        .def_property_readonly("height", &Slider::get_height);
 
     // === Module-level convenience functions ===
     m.def("init", &init_sdl, "Initialize SDL (called automatically when creating a window)");
@@ -625,4 +731,279 @@ PYBIND11_MODULE(Palladium, m) {
         .def_property_readonly("is_focused", &TextField::is_focused)
         .def_readwrite("on_change", &TextField::on_change)
         .def_readwrite("on_submit", &TextField::on_submit);
+
+#ifdef _WIN32
+    // === GPU Acceleration (Windows only) ===
+    
+    // Check if GPU is available
+    m.def("is_gpu_available", []() {
+        return palladium::D2DContext::instance().is_available();
+    }, "Check if GPU acceleration is available");
+    
+    // === GPUSurface ===
+    py::class_<palladium::GPUSurface>(m, "GPUSurface",
+        "GPU-accelerated surface for hardware rendering")
+        .def(py::init<int, int>(), py::arg("width"), py::arg("height"),
+             "Create a GPU surface with the specified dimensions")
+        .def_property_readonly("width", &palladium::GPUSurface::get_width)
+        .def_property_readonly("height", &palladium::GPUSurface::get_height)
+        .def("begin_draw", &palladium::GPUSurface::begin_draw,
+             "Begin drawing operations (call before drawing)")
+        .def("end_draw", &palladium::GPUSurface::end_draw,
+             "End drawing operations (call after drawing)")
+        .def("clear", &palladium::GPUSurface::clear,
+             py::arg("color") = Color(0, 0, 0, 0),
+             "Clear the surface with a color")
+        .def("fill", &palladium::GPUSurface::fill,
+             py::arg("color"),
+             "Fill the entire surface with a color")
+        .def("fill_rect", &palladium::GPUSurface::fill_rect,
+             py::arg("x"), py::arg("y"), py::arg("w"), py::arg("h"), py::arg("color"),
+             "Fill a rectangle")
+        .def("draw_rect", &palladium::GPUSurface::draw_rect,
+             py::arg("x"), py::arg("y"), py::arg("w"), py::arg("h"), py::arg("color"),
+             py::arg("stroke_width") = 1.0f,
+             "Draw a rectangle outline")
+        .def("fill_circle", &palladium::GPUSurface::fill_circle,
+             py::arg("cx"), py::arg("cy"), py::arg("radius"), py::arg("color"),
+             "Fill a circle")
+        .def("draw_circle", &palladium::GPUSurface::draw_circle,
+             py::arg("cx"), py::arg("cy"), py::arg("radius"), py::arg("color"),
+             py::arg("stroke_width") = 1.0f,
+             "Draw a circle outline")
+        .def("fill_rounded_rect", &palladium::GPUSurface::fill_rounded_rect,
+             py::arg("x"), py::arg("y"), py::arg("w"), py::arg("h"),
+             py::arg("radius"), py::arg("color"),
+             "Fill a rounded rectangle")
+        .def("draw_rounded_rect", &palladium::GPUSurface::draw_rounded_rect,
+             py::arg("x"), py::arg("y"), py::arg("w"), py::arg("h"),
+             py::arg("radius"), py::arg("color"), py::arg("stroke_width") = 1.0f,
+             "Draw a rounded rectangle outline")
+        .def("draw_line", &palladium::GPUSurface::draw_line,
+             py::arg("x1"), py::arg("y1"), py::arg("x2"), py::arg("y2"),
+             py::arg("color"), py::arg("stroke_width") = 1.0f,
+             "Draw a line")
+        .def("upload_from", &palladium::GPUSurface::upload_from,
+             py::arg("cpu_surface"),
+             "Upload pixel data from a CPU Surface to this GPU surface")
+        .def("download_to_cpu", &palladium::GPUSurface::download_to_cpu,
+             "Download this GPU surface to a new CPU Surface");
+    
+    // === GPUEffects ===
+    py::class_<palladium::GPUEffects>(m, "GPUEffects",
+        "Hardware-accelerated image effects")
+        .def_static("gaussian_blur", &palladium::GPUEffects::gaussian_blur,
+             py::arg("surface"), py::arg("radius"),
+             "Apply GPU-accelerated Gaussian blur (much faster than CPU)")
+        .def_static("drop_shadow", &palladium::GPUEffects::drop_shadow,
+             py::arg("surface"), py::arg("offset_x"), py::arg("offset_y"),
+             py::arg("blur_radius"), py::arg("color"),
+             "Add a drop shadow effect")
+        .def_static("saturation", &palladium::GPUEffects::saturation,
+             py::arg("surface"), py::arg("saturation"),
+             "Adjust saturation (0=grayscale, 1=normal, >1=oversaturated)")
+        .def_static("brightness", &palladium::GPUEffects::brightness,
+             py::arg("surface"), py::arg("brightness"),
+             "Adjust brightness (-1 to 1, 0=no change)")
+        .def_static("tint", &palladium::GPUEffects::tint,
+             py::arg("surface"), py::arg("color"),
+             "Apply a color tint");
+    
+    // === GPUWindow ===
+    py::class_<palladium::GPUWindow>(m, "GPUWindow",
+        "Hardware-accelerated window using Direct2D/DXGI")
+        .def(py::init<const std::string&, int, int, bool>(),
+             py::arg("title"), py::arg("width"), py::arg("height"),
+             py::arg("vsync") = true,
+             "Create a GPU-accelerated window")
+        .def_property_readonly("width", &palladium::GPUWindow::get_width)
+        .def_property_readonly("height", &palladium::GPUWindow::get_height)
+        .def_property_readonly("title", &palladium::GPUWindow::get_title)
+        .def("set_title", &palladium::GPUWindow::set_title)
+        .def_property_readonly("is_open", &palladium::GPUWindow::is_open)
+        .def("poll_event", [](palladium::GPUWindow& w) -> py::object {
+            Event e;
+            if (w.poll_event(e)) {
+                return py::cast(e);
+            }
+            return py::none();
+        })
+        .def("begin_draw", &palladium::GPUWindow::begin_draw,
+             "Begin drawing to the window")
+        .def("end_draw", &palladium::GPUWindow::end_draw,
+             "End drawing to the window")
+        .def("clear", &palladium::GPUWindow::clear,
+             py::arg("color") = Color(0, 0, 0, 255),
+             "Clear the window with a color")
+        .def("draw", &palladium::GPUWindow::draw,
+             py::arg("surface"), py::arg("x") = 0, py::arg("y") = 0,
+             py::arg("opacity") = 1.0f,
+             "Draw a GPU surface to the window")
+        .def("draw_scaled", &palladium::GPUWindow::draw_scaled,
+             py::arg("surface"), py::arg("x"), py::arg("y"),
+             py::arg("w"), py::arg("h"), py::arg("opacity") = 1.0f,
+             "Draw a GPU surface scaled to the specified size")
+        .def("present", &palladium::GPUWindow::present,
+             "Present the rendered frame to the screen")
+        .def_property_readonly("delta_time", &palladium::GPUWindow::get_delta_time)
+        .def_property_readonly("fps", &palladium::GPUWindow::get_fps)
+        .def("set_target_fps", &palladium::GPUWindow::set_target_fps)
+        .def("set_unfocused_fps", &palladium::GPUWindow::set_unfocused_fps)
+        .def_property_readonly("is_focused", &palladium::GPUWindow::is_focused)
+        .def_property_readonly("is_minimized", &palladium::GPUWindow::is_minimized)
+        .def("set_cursor_visible", &palladium::GPUWindow::set_cursor_visible)
+        .def("set_fullscreen", &palladium::GPUWindow::set_fullscreen)
+        .def_property_readonly("is_fullscreen", &palladium::GPUWindow::is_fullscreen)
+        .def("close", &palladium::GPUWindow::close);
+
+#endif
+
+    // === Text Enums (Common) ===
+    py::enum_<palladium::TextAlign>(m, "TextAlign")
+        .value("Left", palladium::TextAlign::Left)
+        .value("Center", palladium::TextAlign::Center)
+        .value("Right", palladium::TextAlign::Right)
+        .value("Justified", palladium::TextAlign::Justified);
+
+    py::enum_<palladium::TextVAlign>(m, "TextVAlign")
+        .value("Top", palladium::TextVAlign::Top)
+        .value("Middle", palladium::TextVAlign::Middle)
+        .value("Bottom", palladium::TextVAlign::Bottom);
+
+#ifdef _WIN32
+    // === GPUText ===
+    py::class_<palladium::GPUText>(m, "GPUText")
+        .def(py::init<std::string, std::string, float>(),
+             py::arg("text") = "", py::arg("font") = "Arial", py::arg("size") = 16.0f)
+        .def_property("text", &palladium::GPUText::get_text, &palladium::GPUText::set_text)
+        .def_property("font", &palladium::GPUText::get_font, &palladium::GPUText::set_font)
+        .def_property("size", &palladium::GPUText::get_size, &palladium::GPUText::set_size)
+        .def_property("color", &palladium::GPUText::get_color, &palladium::GPUText::set_color)
+        .def_property("x", &palladium::GPUText::get_x, [](palladium::GPUText& t, float v) { t.set_position(v, t.get_y()); })
+        .def_property("y", &palladium::GPUText::get_y, [](palladium::GPUText& t, float v) { t.set_position(t.get_x(), v); })
+        .def("set_position", &palladium::GPUText::set_position)
+        .def_property("width", &palladium::GPUText::get_width, &palladium::GPUText::set_width)
+        .def("set_line_spacing", &palladium::GPUText::set_line_spacing)
+        .def("set_align", &palladium::GPUText::set_align)
+        .def("set_valign", &palladium::GPUText::set_valign)
+        .def("set_shadow", &palladium::GPUText::set_shadow,
+             py::arg("color"), py::arg("offset_x"), py::arg("offset_y"), py::arg("blur"))
+        .def("set_outline", &palladium::GPUText::set_outline,
+             py::arg("color"), py::arg("width"))
+        .def("draw", &palladium::GPUText::draw)
+        .def_property_readonly("render_width", &palladium::GPUText::get_render_width)
+        .def_property_readonly("render_height", &palladium::GPUText::get_render_height);
+#endif
+
+    // === CPUText ===
+    py::class_<palladium::CPUText>(m, "CPUText")
+        .def(py::init<std::string, std::string, float>(),
+             py::arg("text") = "", py::arg("font") = "Arial", py::arg("size") = 16.0f)
+        .def_property("text", &palladium::CPUText::get_text, &palladium::CPUText::set_text)
+        .def_property("font", &palladium::CPUText::get_font, &palladium::CPUText::set_font)
+        .def_property("size", &palladium::CPUText::get_size, &palladium::CPUText::set_size)
+        .def_property("color", &palladium::CPUText::get_color, &palladium::CPUText::set_color)
+        .def_property("x", &palladium::CPUText::get_x, [](palladium::CPUText& t, float v) { t.set_position(v, t.get_y()); })
+        .def_property("y", &palladium::CPUText::get_y, [](palladium::CPUText& t, float v) { t.set_position(t.get_x(), v); })
+        .def("set_position", &palladium::CPUText::set_position)
+        .def_property("width", &palladium::CPUText::get_width, &palladium::CPUText::set_width)
+        .def("set_line_spacing", &palladium::CPUText::set_line_spacing)
+        .def("set_align", &palladium::CPUText::set_align)
+        .def("set_valign", &palladium::CPUText::set_valign)
+        .def("set_shadow", &palladium::CPUText::set_shadow,
+             py::arg("color"), py::arg("offset_x"), py::arg("offset_y"), py::arg("blur"))
+        .def("set_outline", &palladium::CPUText::set_outline,
+             py::arg("color"), py::arg("width"))
+        .def("draw", &palladium::CPUText::draw)
+        .def_property_readonly("render_width", &palladium::CPUText::get_render_width)
+        .def_property_readonly("render_height", &palladium::CPUText::get_render_height);
+
+    // === Text Factory ===
+    m.def("Text", [](std::string text, std::string font, float size) -> py::object {
+#ifdef _WIN32
+        if (is_gpu_mode()) {
+            return py::cast(new palladium::GPUText(text, font, size), py::return_value_policy::take_ownership);
+        }
+#endif
+        return py::cast(new palladium::CPUText(text, font, size), py::return_value_policy::take_ownership);
+    }, py::arg("text") = "", py::arg("font") = "Arial", py::arg("size") = 16.0f,
+    "Create a Text object (GPU or CPU based on current device mode)");
+
+#ifdef _WIN32
+    m.def("load_font", [](const std::string& path) -> bool {
+        return AddFontResourceExA(path.c_str(), FR_PRIVATE, 0) > 0;
+    }, "Load a font from a TTF file for the current process");
+#endif
+
+    // === Unified Factory Functions ===
+    // These return GPU or CPU implementations based on the current device mode
+    
+    m.def("create_window", [](const std::string& title, int width, int height, bool vsync) -> py::object {
+#ifdef _WIN32
+        if (is_gpu_mode()) {
+            return py::cast(new palladium::GPUWindow(title, width, height, vsync), py::return_value_policy::take_ownership);
+        }
+#endif
+        return py::cast(new Window(title, width, height, vsync), py::return_value_policy::take_ownership);
+    }, py::arg("title"), py::arg("width"), py::arg("height"), py::arg("vsync") = true,
+    R"doc(Create a window using the current device mode (GPU or CPU).
+
+Call ui.device('gpu') before this to get a GPU-accelerated window.
+
+Example:
+    ui.device('gpu' if ui.is_gpu_available() else 'cpu')
+    window = ui.create_window("My App", 800, 600)
+)doc");
+
+    m.def("create_surface", [](int width, int height) -> py::object {
+#ifdef _WIN32
+        if (is_gpu_mode()) {
+            return py::cast(new palladium::GPUSurface(width, height), py::return_value_policy::take_ownership);
+        }
+#endif
+        return py::cast(std::make_shared<Surface>(width, height));
+    }, py::arg("width"), py::arg("height"),
+    R"doc(Create a surface using the current device mode (GPU or CPU).
+
+Call ui.device('gpu') before this to get a GPU-accelerated surface.
+
+Example:
+    ui.device('gpu' if ui.is_gpu_available() else 'cpu')
+    surface = ui.create_surface(400, 300)
+)doc");
+
+    // === Unified blur function that works with both GPU and CPU surfaces ===
+    m.def("blur", [](py::object surface, float radius) {
+#ifdef _WIN32
+        // Try GPU surface first
+        try {
+            auto& gpu_surf = surface.cast<palladium::GPUSurface&>();
+            palladium::GPUEffects::gaussian_blur(gpu_surf, radius);
+            return;
+        } catch (const py::cast_error&) {
+            // Not a GPU surface, continue to CPU
+        }
+#endif
+        // Try CPU surface
+        try {
+            auto& cpu_surf = surface.cast<Surface&>();
+            Effects::gaussian_blur(cpu_surf, radius);
+        } catch (const py::cast_error&) {
+            throw std::runtime_error("blur() requires a Surface or GPUSurface");
+        }
+    }, py::arg("surface"), py::arg("radius"),
+    R"doc(Apply Gaussian blur to a surface (works with both GPU and CPU surfaces).
+
+This function automatically detects the surface type and uses the appropriate
+implementation (GPU-accelerated or CPU).
+
+Args:
+    surface: A Surface or GPUSurface to blur
+    radius: Blur radius in pixels
+
+Example:
+    ui.device('gpu' if ui.is_gpu_available() else 'cpu')
+    surface = ui.create_surface(400, 300)
+    ui.blur(surface, 15.0)  # Automatically uses GPU if available
+)doc");
 }

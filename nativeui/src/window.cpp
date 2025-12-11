@@ -47,7 +47,9 @@ Window::Window(const std::string& title, int width, int height, bool vsync)
     , last_frame_time_(0)
     , delta_time_(0.0f)
     , fps_(0.0f)
+
     , target_fps_(0)
+    , unfocused_fps_(0)
 {
     init_sdl();
     
@@ -217,16 +219,44 @@ void Window::present(const Surface& surface)
     update_timing();
 }
 
+void Window::draw(std::shared_ptr<Surface> surface) {
+    pending_surface_ = surface;
+}
+
+void Window::present() {
+    if (pending_surface_) {
+        present(*pending_surface_);
+        pending_surface_ = nullptr;
+    } else {
+        SDL_RenderPresent(renderer_);
+        update_timing();
+    }
+}
+
 void Window::clear(const Color& color)
 {
     SDL_SetRenderDrawColor(renderer_, color.r, color.g, color.b, color.a);
     SDL_RenderClear(renderer_);
 }
 
+
+
 void Window::update_timing()
 {
     uint64_t current_time = SDL_GetPerformanceCounter();
     uint64_t frequency = SDL_GetPerformanceFrequency();
+    
+    // Check window state for FPS throttling
+    int effective_target_fps = target_fps_;
+    
+    if (is_minimized()) {
+        // When minimized, heavily throttle to save resources
+        // User asked to stop drawing, effectively this loop handles timing
+        // We'll cap at 5 FPS to keep the loop moving but very slowly
+        effective_target_fps = 5;
+    } else if (unfocused_fps_ > 0 && !is_focused()) {
+        effective_target_fps = unfocused_fps_;
+    }
     
     delta_time_ = static_cast<float>(current_time - last_frame_time_) / frequency;
     if (delta_time_ > 0.0f) {
@@ -234,8 +264,8 @@ void Window::update_timing()
     }
     
     // Frame rate limiting
-    if (target_fps_ > 0) {
-        float target_frame_time = 1.0f / target_fps_;
+    if (effective_target_fps > 0) {
+        float target_frame_time = 1.0f / effective_target_fps;
         if (delta_time_ < target_frame_time) {
             SDL_Delay(static_cast<Uint32>((target_frame_time - delta_time_) * 1000.0f));
             current_time = SDL_GetPerformanceCounter();
@@ -249,6 +279,23 @@ void Window::update_timing()
 void Window::set_target_fps(int fps)
 {
     target_fps_ = fps;
+}
+
+void Window::set_unfocused_fps(int fps)
+{
+    unfocused_fps_ = fps;
+}
+
+bool Window::is_focused() const
+{
+    Uint32 flags = SDL_GetWindowFlags(window_);
+    return (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+}
+
+bool Window::is_minimized() const
+{
+    Uint32 flags = SDL_GetWindowFlags(window_);
+    return (flags & SDL_WINDOW_MINIMIZED) != 0;
 }
 
 void Window::set_cursor_visible(bool visible)
