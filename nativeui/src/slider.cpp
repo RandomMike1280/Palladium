@@ -59,9 +59,13 @@ void Slider::set_colors(const nativeui::Color& bg, const nativeui::Color& fill, 
 }
 
 void Slider::update(float dt) {
+    // Stability: Clamp dt to prevent physics explosion
+    if (dt > 0.04f) dt = 0.04f;
+    if (dt < 0.0f) dt = 0.0f;
+
     // Spring physics constants
     const float tension = 150.0f;
-    const float friction = 25.0f; // Increased to ~critical damping (2 * sqrt(150) ~= 24.5) to prevent overshoot
+    const float friction = 25.0f; // Critical damping logic relies on friction * dt < 2.0
 
     // Animate Value Display
     float val_diff = value_ - current_value_display_;
@@ -102,11 +106,37 @@ void Slider::update(float dt) {
     float over_acc = over_diff * tension - overshoot_velocity_ * friction;
     overshoot_velocity_ += over_acc * dt;
     current_overshoot_ += overshoot_velocity_ * dt;
+    
+    // Fine Control Logic
+    if (is_pressing_candidate_) {
+        time_since_press_ += dt;
+        if (time_since_press_ > 0.3f) { // 0.3s hold trigger
+            is_pressing_candidate_ = false;
+            is_fine_control_active_ = true;
+            // Re-base drag to prevent jump when scale changes
+            drag_start_value_ = value_;
+            drag_start_mouse_x_ = press_origin_x_; 
+        }
+    }
+    
+    // Animate Zoom
+    float target_zoom = is_fine_control_active_ ? 4.0f : 1.0f; // 4x Zoom
+    float zoom_diff = target_zoom - current_zoom_;
+    float zoom_acc = zoom_diff * tension - zoom_velocity_ * friction;
+    zoom_velocity_ += zoom_acc * dt;
+    current_zoom_ += zoom_velocity_ * dt;
 }
 
-void Slider::handle_event(const nativeui::Event& event) {
+    void Slider::handle_event(const nativeui::Event& event) {
     if (event.type == nativeui::EventType::MouseMotion) {
         if (is_dragging_) {
+            // Check for hold cancel
+            if (is_pressing_candidate_) {
+                if (std::abs(event.mouse_x - press_origin_x_) > 5) {
+                    is_pressing_candidate_ = false;
+                    time_since_press_ = 0.0f;
+                }
+            }
             update_value_from_mouse(event.mouse_x, event.mouse_y);
         } else {
             is_hovered_ = hit_test(event.mouse_x, event.mouse_y);
@@ -114,12 +144,41 @@ void Slider::handle_event(const nativeui::Event& event) {
     } else if (event.type == nativeui::EventType::MouseButtonDown && event.mouse_button == 1) { // Left click
         if (hit_test(event.mouse_x, event.mouse_y)) {
             is_dragging_ = true;
+            if (shape_ == SliderShape::Selector) {
+                drag_start_value_ = value_;
+                drag_start_mouse_x_ = event.mouse_x;
+                
+                // Init Fine Control candidate
+                if (fine_control_enabled_) {
+                    is_pressing_candidate_ = true;
+                    time_since_press_ = 0.0f;
+                    press_origin_x_ = event.mouse_x;
+                    is_fine_control_active_ = false;
+                }
+            }
             update_value_from_mouse(event.mouse_x, event.mouse_y);
         }
     } else if (event.type == nativeui::EventType::MouseButtonUp && event.mouse_button == 1) {
         if (is_dragging_) {
             is_dragging_ = false;
-            // Overshoot will animate back to 0 in update()
+            is_pressing_candidate_ = false;
+            is_fine_control_active_ = false;
+            
+            if (shape_ == SliderShape::Selector) {
+                // Snap to nearest tick 
+                float snap_density = 10.0f;
+                // Use finer snap if we were zoomed in
+                if (current_zoom_ > 2.0f) snap_density = 50.0f;
+                
+                float v = value_to_visual(value_);
+                float snapped_v = std::round(v * snap_density) / snap_density;
+                float snapped_val = visual_to_value(snapped_v);
+                
+                // Always snap
+                set_value(snapped_val);
+                if (on_change_) on_change_(value_);
+            }
+            // Overshoot will animate back to 0 in update() for linear sliders
         }
     } else if (event.type == nativeui::EventType::MouseWheel) {
         if (is_hovered_) {
@@ -168,6 +227,33 @@ bool Slider::hit_test(int mx, int my) const {
 }
 
 void Slider::update_value_from_mouse(int mx, int my) {
+    if (shape_ == SliderShape::Selector) {
+        float scale = pixels_per_segment_ * current_zoom_;
+        float delta_px = (float)(drag_start_mouse_x_ - mx);
+        float visual_delta = delta_px / scale;
+        float current_v = value_to_visual(drag_start_value_) + visual_delta;
+        
+        float max_v = 0.0f;
+        if (!stops_.empty()) max_v = (float)(stops_.size() - 1);
+        
+        if (current_v < 0.0f) {
+            set_value(min_);
+            float excess_visual = current_v; // Negative
+            float excess_px = excess_visual * scale;
+            drag_overshoot_ = excess_px * 0.5f; // Rubber band resistance
+        } else if (current_v > max_v) {
+            set_value(max_);
+            float excess_visual = current_v - max_v; // Positive
+            float excess_px = excess_visual * scale;
+            drag_overshoot_ = excess_px * 0.5f; // Rubber band resistance
+        } else {
+            float new_val = visual_to_value(current_v);
+            set_value(new_val);
+            drag_overshoot_ = 0.0f;
+        }
+        return;
+    }
+
     float t = 0.0f; // 0.0 to 1.0
 
     if (shape_ == SliderShape::Arc) {
@@ -230,6 +316,121 @@ void Slider::update_value_from_mouse(int mx, int my) {
 }
 
 void Slider::draw(palladium::GPUSurface& surface) {
+    if (shape_ == SliderShape::Selector) {
+        // Selector Draw Logic
+        // Background
+        // surface.fill_rect(x_, y_, width_, height_, bg_color_); // Optional explicit bg
+        
+        // 1. Draw Large Value
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(0) << current_value_display_ << "x";
+        std::string val_txt = ss.str();
+        float font_size = 48.0f;
+        float tx = x_ + width_ / 2.0f - (val_txt.length() * font_size * 0.25f); // Centered
+        float ty = y_ + 10.0f; // Top margin
+        surface.draw_text(val_txt, tx, ty, "Roboto Bold", font_size, text_color_);
+        
+        // 2. Draw Indicator (Triangle)
+        float cx = x_ + width_ / 2.0f;
+        float indicator_y = ty + font_size + 10.0f;
+        // Simple triangle using lines
+        surface.draw_line((int)cx - 10, (int)indicator_y, (int)cx, (int)indicator_y + 10, nativeui::Color(255, 255, 255, 255), 2.0f);
+        surface.draw_line((int)cx, (int)indicator_y + 10, (int)cx + 10, (int)indicator_y, nativeui::Color(255, 255, 255, 255), 2.0f);
+        // Vertical line down
+        surface.draw_line((int)cx, (int)indicator_y + 10, (int)cx, (int)y_ + height_ - 20, nativeui::Color(255, 255, 255, 255), 2.0f);
+
+        // 3. Draw Tape
+        float tape_y = indicator_y + 15.0f;
+        float tape_h = height_ - (tape_y - y_);
+        
+        // Clip Tape area
+        // Clip Tape area (Extend height to include labels)
+        bool use_clip = (tape_h > 1.0f && width_ > 1.0f);
+        if (use_clip) {
+             surface.push_axis_aligned_clip((int)x_, (int)tape_y, (int)width_, (int)tape_h + 30);
+        }
+        
+        // Include overshoot in visual position
+        float scale = pixels_per_segment_ * current_zoom_;
+        float v_center = value_to_visual(current_value_display_) + current_overshoot_ / scale;
+        float visible_v_range = width_ / scale;
+        
+        // Dynamic Ticks
+        float step_density = 10.0f;
+        // Keep high density while zoomed (even while animating out)
+        if (fine_control_enabled_ || current_zoom_ > 1.01f) step_density = 50.0f; 
+        
+        int v_start_idx = (int)std::floor((v_center - visible_v_range * 0.6f) * step_density);
+        int v_end_idx = (int)std::ceil((v_center + visible_v_range * 0.6f) * step_density);
+        
+        // Smoother Sub-tick Fade (Linear over range 1.0 -> 4.0)
+        float sub_tick_alpha = std::clamp((current_zoom_ - 1.0f) / 3.0f, 0.0f, 1.0f);
+        // Minor Label Fade (Start at 2.0 -> 4.0)
+        float minor_label_alpha = std::clamp((current_zoom_ - 2.0f) / 2.0f, 0.0f, 1.0f);
+        
+        for (int i = v_start_idx; i <= v_end_idx; ++i) {
+            float v = i / step_density;
+            float px = cx + (v - v_center) * scale;
+            
+            // Determine Tick Type
+            float v_10 = v * 10.0f;
+            float v_1 = v;
+            bool is_major = (std::abs(v_1 - std::round(v_1)) < 0.005f);
+            bool is_minor = (std::abs(v_10 - std::round(v_10)) < 0.005f);
+            bool is_sub = !is_major && !is_minor;
+            
+            if (is_sub && sub_tick_alpha <= 0.01f) continue;
+
+            float base_h = is_major ? 20.0f : (is_minor ? 10.0f : 6.0f);
+            
+            nativeui::Color tick_col = text_color_;
+            float dist = std::abs(px - cx);
+            
+            // Continuous Fade
+            // Fade out completely before hitting the edge (0.4w instead of 0.5w)
+            float alpha = 1.0f - std::clamp(dist / (width_ * 0.4f), 0.0f, 1.0f);
+            alpha = alpha * alpha; // Quadratic falloff 
+            
+            if (is_sub) alpha *= sub_tick_alpha;
+
+            tick_col.a = (uint8_t)(text_color_.a * alpha); 
+            
+            if (alpha > 0.01f) {
+                // Dynamic Height Boost
+                float proximity = 1.0f - std::clamp((dist / (width_ * 0.15f)), 0.0f, 1.0f);
+                float height_boost = 15.0f * (proximity * proximity); 
+                float final_h = base_h + height_boost * (is_sub ? 0.3f : 1.0f);
+                
+                float tape_center_y = tape_y + 20.0f;
+                float y1 = tape_center_y - final_h / 2.0f;
+                float y2 = tape_center_y + final_h / 2.0f;
+
+                float thickness = is_major ? 3.0f : (is_minor ? 2.0f : 1.0f);
+                
+                surface.draw_line((int)px, (int)y1, (int)px, (int)y2, tick_col, thickness);
+                
+                // Draw Labels (Major + Minor if zoomed)
+                if (is_major || (is_minor && minor_label_alpha > 0.05f)) {
+                    float val_at_tick = visual_to_value(v);
+                    std::stringstream ss_lbl;
+                    ss_lbl << std::fixed << std::setprecision(0) << val_at_tick << "x";
+                    std::string lbl = ss_lbl.str();
+                    
+                    float lbl_size = is_major ? 14.0f : 12.0f;
+                    nativeui::Color lbl_col = tick_col;
+                    if (is_minor && !is_major) lbl_col.a = (uint8_t)(lbl_col.a * minor_label_alpha);
+                    
+                    if (lbl_col.a > 10) {
+                        surface.draw_text(lbl, px - (lbl.length() * lbl_size * 0.3f), y2 + 5, "Roboto Bold", lbl_size, lbl_col);
+                    }
+                }
+            }
+        }
+        
+        if (use_clip) surface.pop_clip();
+        return;
+    }
+
     float t = (current_value_display_ - min_) / (max_ - min_);
     t = std::clamp(t, 0.0f, 1.0f);
 
@@ -301,67 +502,68 @@ void Slider::draw(palladium::GPUSurface& surface) {
             }
         }
         
-        // Linear Text Inversion Logic
+        // Unified Value Text Display
         if (show_value_ && (is_hovered_ || is_dragging_)) {
             std::stringstream ss;
             ss << std::fixed << std::setprecision(0) << current_value_display_;
             std::string txt = ss.str();
             float font_size = 14.0f;
             
-            // Calculate Text Position
-            float stretch = current_overshoot_ * 0.5f;
-            float dx = x_;
-            float dw = width_;
-            if (stretch < 0) { dx += stretch; dw -= stretch; }
-            else { dw += stretch; }
-            float tx = dx + dw / 2.0f - (txt.length() * font_size * 0.3f);
-            float ty = y_ + height_ / 2.0f - font_size * 0.5f;
-            
-            // 1. Draw Text in Fill Color (Primary) - appears over background
-            surface.draw_text(txt, tx, ty, "Roboto Bold", font_size, fill_color_);
-            
-            // 2. Re-draw fill logic to get the clip rect
-            // Note: We already drew the fill above. 
-            // We need to define the clip rect for the "filled" part.
-            float fill_width = draw_width * t;
-             if (t >= 0.99f && stretch_amount > 0) fill_width = draw_width;
-             
-            if (fill_width > 1.0f) {
-                if (shape_ == SliderShape::Pill) {
-                    surface.push_rounded_clip((int)draw_x, (int)draw_y, (int)fill_width, (int)new_thickness, new_thickness * 0.5f);
+            float tx, ty;
+
+            if (shape_ == SliderShape::Arc) {
+                // Arc is handled separately below or doesn't support linear clip
+                tx = x_ - (txt.length() * font_size * 0.3f); 
+                ty = y_ - font_size * 0.5f;
+                surface.draw_text(txt, tx, ty, "Roboto Bold", font_size, text_color_);
+            } else { // Rect / Pill
+                // Recalculate Geometry (Scope is outside specific shape blocks)
+                float stretch_amount = current_overshoot_ * 0.5f;
+                float dx = x_;
+                float dw = width_;
+                
+                if (stretch_amount < 0.0f) {
+                    dx += stretch_amount;
+                    dw -= stretch_amount;
                 } else {
-                    surface.push_axis_aligned_clip((int)draw_x, (int)draw_y, (int)fill_width, (int)new_thickness);
+                    dw += stretch_amount;
                 }
                 
-                // 3. Draw Text in Background Color (Secondary) - appears over fill
-                surface.draw_text(txt, tx, ty, "Roboto Bold", font_size, bg_color_);
+                float original_area = width_ * current_thickness_;
+                float d_thick = original_area / dw;
+                d_thick = std::clamp(d_thick, current_thickness_ * 0.4f, current_thickness_);
+                float dy = y_ + height_ / 2.0f - d_thick / 2.0f;
+
+                tx = dx + dw / 2.0f - (txt.length() * font_size * 0.3f);
+                ty = y_ + height_ / 2.0f - font_size * 0.5f;
                 
-                if (shape_ == SliderShape::Pill) {
-                     surface.pop_rounded_clip();
-                } else {
-                     surface.pop_clip();
+                // Difference Mask Logic
+                // 1. Draw Text for Empty Area (using fill_color_ or dimmed text)
+                // Appears on the gray background. Using fill_color_ approximates "inverted" look.
+                surface.draw_text(txt, tx, ty, "Roboto Bold", font_size, fill_color_); 
+                
+                // 2. Draw Text for Filled Area (using text_color_)
+                float fill_w = dw * t;
+                if (t >= 0.99f && stretch_amount > 0) fill_w = dw;
+                
+                // Only clip if there is a fill to clip to
+                if (fill_w > 1.0f) {
+                   if (shape_ == SliderShape::Pill) {
+                        surface.push_rounded_clip((int)dx, (int)dy, (int)fill_w, (int)d_thick, d_thick * 0.5f);
+                   } else {
+                        surface.push_axis_aligned_clip((int)dx, (int)dy, (int)fill_w, (int)d_thick);
+                   }
+                   
+                   // Inner text (White/Text Color) on Top of Fill
+                   surface.draw_text(txt, tx, ty, "Roboto Bold", font_size, text_color_);
+                   
+                   if (shape_ == SliderShape::Pill) {
+                        surface.pop_rounded_clip();
+                   } else {
+                        surface.pop_clip();
+                   }
                 }
             }
-        }
-        return; // Skip default text drawing for linear
-    }
-
-    // Text Display (Fallback for Arc)
-    if (show_value_ && (is_hovered_ || is_dragging_)) {
-        // Construct string
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(0) << current_value_display_;
-        std::string txt = ss.str();
-        
-        float font_size = 14.0f;
-        // Position
-        float tx, ty;
-        
-        if (shape_ == SliderShape::Arc) {
-            tx = x_ - (txt.length() * font_size * 0.3f); // Approx centered
-            ty = y_ - font_size * 0.5f;
-            // Draw Text (Simple contrast: always white or text_color)
-             surface.draw_text(txt, tx, ty, "Roboto Bold", font_size, text_color_);
         }
     }
 }
@@ -369,6 +571,122 @@ void Slider::draw(palladium::GPUSurface& surface) {
 
 // CPU Draw Implementation
 void Slider::draw(nativeui::Surface& surface) {
+    if (shape_ == SliderShape::Selector) {
+        // Selector 
+        // 1. Large Value Text
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(0) << current_value_display_ << "x";
+        std::string val_txt = ss.str();
+        
+        int text_size = 48;
+        auto font_large = nativeui::FontCache::get("Roboto Bold", text_size);
+        int ty_top = (int)y_ + 10;
+        float cx = x_ + width_ / 2.0f;
+
+        if (font_large) {
+            auto text_surf = font_large->render(val_txt, text_color_);
+            if (text_surf) {
+                surface.blit_alpha(*text_surf, (int)(cx - text_surf->get_width()/2), ty_top);
+            }
+        }
+        
+        // 2. Indicator
+        int ind_y = ty_top + text_size + 10;
+        surface.draw_line((int)cx - 10, ind_y, (int)cx, ind_y + 10, nativeui::Color(255, 255, 255, 255));
+        surface.draw_line((int)cx, ind_y + 10, (int)cx + 10, ind_y, nativeui::Color(255, 255, 255, 255));
+        surface.draw_line((int)cx, ind_y + 10, (int)cx, (int)y_ + (int)height_ - 20, nativeui::Color(255, 255, 255, 255));
+
+        // 3. Tape
+        float tape_y = (float)ind_y + 15.0f;
+        
+        float scale = pixels_per_segment_ * current_zoom_;
+        float v_center = value_to_visual(current_value_display_) + current_overshoot_ / scale;
+        float visible_v_range = width_ / scale;
+        
+        // Dynamic Ticks
+        float step_density = 10.0f;
+        // Keep high density while zoomed (even while animating out)
+        if (fine_control_enabled_ || current_zoom_ > 1.01f) step_density = 50.0f; 
+        
+        int v_start_idx = (int)std::floor((v_center - visible_v_range * 0.6f) * step_density);
+        int v_end_idx = (int)std::ceil((v_center + visible_v_range * 0.6f) * step_density);
+        
+        // Smoother Sub-tick Fade (Linear over range 1.0 -> 4.0)
+        float sub_tick_alpha = std::clamp((current_zoom_ - 1.0f) / 3.0f, 0.0f, 1.0f);
+        // Minor Label Fade (Start at 2.0 -> 4.0)
+        float minor_label_alpha = std::clamp((current_zoom_ - 2.0f) / 2.0f, 0.0f, 1.0f);
+
+        auto font_major = nativeui::FontCache::get("Roboto Bold", 14);
+        auto font_minor = nativeui::FontCache::get("Roboto Bold", 12);
+
+        for (int i = v_start_idx; i <= v_end_idx; ++i) {
+            float v = i / step_density;
+            float px = cx + (v - v_center) * scale;
+            
+            // Manual Clip
+            if (px < x_ || px > x_ + width_) continue;
+            
+             // Determine Tick Type
+            float v_10 = v * 10.0f;
+            float v_1 = v;
+            bool is_major = (std::abs(v_1 - std::round(v_1)) < 0.005f);
+            bool is_minor = (std::abs(v_10 - std::round(v_10)) < 0.005f);
+            bool is_sub = !is_major && !is_minor;
+            
+            if (is_sub && sub_tick_alpha <= 0.01f) continue;
+            
+            float base_h = is_major ? 20.0f : (is_minor ? 10.0f : 6.0f);
+            
+            nativeui::Color tick_col = text_color_;
+            float dist = std::abs(px - cx);
+            
+            // Continuous Fade (CPU)
+            // Fade out completely before hitting the edge (0.4w instead of 0.5w)
+            float alpha = 1.0f - std::clamp(dist / (width_ * 0.4f), 0.0f, 1.0f);
+            alpha = alpha * alpha; 
+            
+            if (is_sub) alpha *= sub_tick_alpha;
+            
+            tick_col.a = (uint8_t)(text_color_.a * alpha);
+            
+             if (alpha > 0.01f) {
+                // Dynamic Height Boost
+                float proximity = 1.0f - std::clamp((dist / (width_ * 0.15f)), 0.0f, 1.0f);
+                float height_boost = 15.0f * (proximity * proximity); 
+                float final_h = base_h + height_boost * (is_sub ? 0.3f : 1.0f);
+                
+                float tape_center_y = tape_y + 20.0f;
+                float y1 = tape_center_y - final_h / 2.0f;
+                
+                int thickness = is_major ? 3 : (is_minor ? 2 : 1);
+                // Use fill_rect to simulate thickness on CPU
+                surface.fill_rect((int)(px - thickness/2.0f), (int)y1, thickness, (int)final_h, tick_col);
+                
+                // Draw Labels
+                if (is_major || (is_minor && minor_label_alpha > 0.05f)) {
+                    float val_at_tick = visual_to_value(v);
+                    std::stringstream ss_lbl;
+                    ss_lbl << std::fixed << std::setprecision(0) << val_at_tick << "x";
+                    
+                    nativeui::Color lbl_col = tick_col;
+                    auto font = font_major;
+                    if (is_minor && !is_major) {
+                         lbl_col.a = (uint8_t)(lbl_col.a * minor_label_alpha);
+                         font = font_minor;
+                    }
+                    
+                    if (font && lbl_col.a > 10) {
+                        auto lbl_surf = font->render(ss_lbl.str(), lbl_col);
+                        if (lbl_surf) {
+                             surface.blit_alpha(*lbl_surf, (int)px - lbl_surf->get_width()/2, (int)(tape_center_y + final_h/2.0f + 5));
+                        }
+                    }
+                }
+             }
+        }
+        return;
+    }
+
     float t = (current_value_display_ - min_) / (max_ - min_);
     t = std::clamp(t, 0.0f, 1.0f);
 
@@ -491,5 +809,38 @@ void Slider::draw(nativeui::Surface& surface) {
         }
     }
 } 
+
+void Slider::set_exponential_stops(const std::vector<float>& stops) {
+    stops_ = stops;
+}
+
+float Slider::value_to_visual(float val) const {
+    if (stops_.empty()) return (val - min_) / (max_ - min_); // Fallback linear
+    
+    // Find segment
+    for (size_t i = 0; i < stops_.size() - 1; ++i) {
+        if (val >= stops_[i] && val <= stops_[i+1]) {
+            float t = (val - stops_[i]) / (stops_[i+1] - stops_[i]);
+            return (float)i + t; // Visual units
+        }
+    }
+    // Out of bounds
+    if (val < stops_.front()) return 0.0f;
+    if (val > stops_.back()) return (float)(stops_.size() - 1);
+    return 0.0f;
+}
+
+float Slider::visual_to_value(float v) const {
+    if (stops_.empty()) return min_ + v * (max_ - min_); // Fallback linear bound to 0-1
+    
+    v = std::clamp(v, 0.0f, (float)(stops_.size() - 1));
+    int i = (int)v;
+    if (i >= stops_.size() - 1) i = stops_.size() - 2;
+    
+    float t = v - (float)i;
+    float start = stops_[i];
+    float end = stops_[i+1];
+    return start + t * (end - start);
+}
 
 } // namespace nativeui

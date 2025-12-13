@@ -1,5 +1,5 @@
 /**
- * NativeUI - Python bindings using pybind11
+ * Palladium - Python bindings using pybind11
  */
 
 #include <pybind11/pybind11.h>
@@ -612,28 +612,27 @@ Example:
     py::enum_<SliderShape>(m, "SliderShape")
         .value("Rectangle", SliderShape::Rectangle)
         .value("Pill", SliderShape::Pill)
-        .value("Arc", SliderShape::Arc);
+        .value("Arc", SliderShape::Arc)
+        .value("Selector", SliderShape::Selector);
 
     // === Slider ===
     py::class_<Slider, std::shared_ptr<Slider>>(m, "Slider")
-        .def(py::init<SliderShape>(), py::arg("shape") = SliderShape::Pill)
+        .def(py::init<SliderShape>(), py::arg("shape") = SliderShape::Rectangle)
         .def_property("value", &Slider::get_value, &Slider::set_value)
-        .def("set_range", &Slider::set_range, py::arg("min"), py::arg("max"))
+        .def("set_range", &Slider::set_range)
         .def_property("shape", &Slider::get_shape, &Slider::set_shape)
-        .def("set_position", &Slider::set_position, py::arg("x"), py::arg("y"))
-        .def("set_dimensions", &Slider::set_dimensions,
-             py::arg("width"), py::arg("height"), "Set length/width and thickness/height")
-        .def("set_arc_angles", &Slider::set_arc_angles,
-             py::arg("start"), py::arg("sweep"), "Set start and sweep angles for Arc shape")
-        .def("set_colors", &Slider::set_colors,
-             py::arg("bg"), py::arg("fill"), py::arg("text"))
+        .def("set_position", &Slider::set_position)
+        .def("set_dimensions", &Slider::set_dimensions)
+        .def("set_arc_angles", &Slider::set_arc_angles)
+        .def("set_colors", &Slider::set_colors)
         .def("set_show_value", &Slider::set_show_value)
+        .def("set_exponential_stops", &Slider::set_exponential_stops, py::arg("stops"))
+        .def("set_fine_control_enabled", &Slider::set_fine_control_enabled, py::arg("enabled"))
         .def("on_change", &Slider::on_change)
         .def("update", &Slider::update)
         .def("handle_event", &Slider::handle_event)
         .def("draw", py::overload_cast<palladium::GPUSurface&>(&Slider::draw))
         .def("draw", py::overload_cast<nativeui::Surface&>(&Slider::draw))
-        // Read-only metrics
         .def_property_readonly("x", &Slider::get_x)
         .def_property_readonly("y", &Slider::get_y)
         .def_property_readonly("width", &Slider::get_width)

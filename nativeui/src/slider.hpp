@@ -13,7 +13,8 @@ namespace nativeui {
 enum class SliderShape {
     Rectangle,
     Pill,
-    Arc
+    Arc,
+    Selector
 };
 
 class Slider {
@@ -29,9 +30,13 @@ public:
     void set_shape(SliderShape shape);
     SliderShape get_shape() const { return shape_; }
     
+    // For Selector
+    void set_exponential_stops(const std::vector<float>& stops);
+    
     // Position & Dimensions
     // For Linear: width = length, height = thickness
     // For Arc: width = radius, height = thickness (and sweep angle)
+    // For Selector: width = visible area width, height = total height
     void set_position(float x, float y);
     void set_dimensions(float width, float height); // Width/Length, Height/Thickness
     void set_arc_angles(float start, float sweep); // For Arc shape
@@ -41,6 +46,7 @@ public:
     
     // Config
     void set_show_value(bool show) { show_value_ = show; }
+    void set_fine_control_enabled(bool enabled) { fine_control_enabled_ = enabled; }
     
     // Callbacks
     void on_change(std::function<void(float)> callback) { on_change_ = callback; }
@@ -65,6 +71,10 @@ private:
     float value_ = 0.0f;
     bool show_value_ = true;
     
+    // Selector Config
+    std::vector<float> stops_;
+    float pixels_per_segment_ = 150.0f; 
+    
     // Layout
     float x_ = 0.0f;
     float y_ = 0.0f;
@@ -83,6 +93,8 @@ private:
     // State
     bool is_hovered_ = false;
     bool is_dragging_ = false;
+    float drag_start_value_ = 0.0f;
+    int drag_start_mouse_x_ = 0;
     
     // Anim state
     float current_value_display_ = 0.0f; // Smoothed value
@@ -98,12 +110,27 @@ private:
     float current_overshoot_ = 0.0f; // Animated overshoot
     float overshoot_velocity_ = 0.0f;
     
+    // Fine Control
+    bool fine_control_enabled_ = true;
+    bool is_fine_control_active_ = false;
+    bool is_pressing_candidate_ = false; // Tracking hold
+    float time_since_press_ = 0.0f;
+    int press_origin_x_ = 0;
+    
+    // Zoom Animation
+    float current_zoom_ = 1.0f;
+    float zoom_velocity_ = 0.0f;
+    
     // Callback
     std::function<void(float)> on_change_;
     
     // Helpers
     void update_value_from_mouse(int mx, int my);
     bool hit_test(int mx, int my) const;
+    
+    // Selector Mapping
+    float value_to_visual(float val) const;
+    float visual_to_value(float v) const;
 };
 
 } // namespace nativeui
